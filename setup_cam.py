@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-set -euo pipefail
+#set -euo pipefail
 
 # -------------------------------------------------------------------
 # One-shot setup + run for MobileNet-SSD object detection on Raspberry Pi
