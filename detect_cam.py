@@ -1,10 +1,18 @@
 #!/usr/bin/env python3
 import time
-import argparse
 import numpy as np
 import cv2
-import tensorflow as tf
 from pathlib import Path
+
+# Prefer the lightweight tflite-runtime on Raspberry Pi
+try:
+    import tflite_runtime.interpreter as tflite
+    Interpreter = tflite.Interpreter
+except ImportError:
+    # Fallback if you actually have full TensorFlow installed
+    import tensorflow as tf
+    Interpreter = tf.lite.Interpreter
+
 
 def load_labels(path):
     labels = []
@@ -31,7 +39,7 @@ def main():
     labels = load_labels(labels_path)
 
     # Load TFLite model
-    interpreter = tf.lite.Interpreter(model_path=str(model_path))
+    interpreter = Interpreter(model_path=str(MODEL))
     interpreter.allocate_tensors()
     in_det = interpreter.get_input_details()[0]
     out_det = interpreter.get_output_details()
