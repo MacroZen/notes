@@ -3,6 +3,9 @@ import time
 import numpy as np
 import cv2
 from pathlib import Path
+import argparse
+
+
 
 # Prefer the lightweight tflite-runtime on Raspberry Pi
 try:
@@ -12,7 +15,6 @@ except ImportError:
     # Fallback if you actually have full TensorFlow installed
     import tensorflow as tf
     Interpreter = tf.lite.Interpreter
-
 
 def load_labels(path):
     labels = []
