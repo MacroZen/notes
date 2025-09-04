@@ -18,7 +18,7 @@ SIZE="${SIZE:-320}"        # inference size
 THRESH="${THRESH:-0.5}"    # confidence threshold
 VENV_NAME="${VENV_NAME:-opencv}"
 
-echo "[1/7] System prerequisites..."
+#echo "[1/7] System prerequisites..."
 sudo apt-get update -y
 sudo apt-get install -y python3-venv python3-pip unzip wget \
                         v4l-utils ffmpeg libgl1 libglib2.0-0
@@ -27,18 +27,18 @@ WORKDIR="$(pwd)/vision"
 mkdir -p "$WORKDIR"
 cd "$WORKDIR"
 
-echo "[2/7] Virtual environment: $VENV_NAME"
+#echo "[2/7] Virtual environment: $VENV_NAME"
 if [[ ! -d "$VENV_NAME" ]]; then
   python3 -m venv "$VENV_NAME"
 fi
 # shellcheck disable=SC1091
 source "$VENV_NAME/bin/activate"
 
-echo "[3/7] Python deps..."
+#echo "[3/7] Python deps..."
 python -m pip install --upgrade pip setuptools wheel
 pip install --upgrade opencv-python numpy
 
-echo "[3b] Checking for tflite-runtime..."
+#echo "[3b] Checking for tflite-runtime..."
 USE_TFLITE=1
 python - <<'PY' || USE_TFLITE=0
 try:
