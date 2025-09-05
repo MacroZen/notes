@@ -1,33 +1,30 @@
 #!/usr/bin/env python3
 """
-detect_cam.py — simple, robust TFLite live detection
-#########################################################################################################
-##########################################                    v1.1.0                    ##########################################
-#########################################################################################################
-Features
-- Works with tflite_runtime OR tensorflow.lite (auto-fallback)
-- Optional EdgeTPU delegate if available (--edgetpu)
-- Looks for model in multiple locations, helpful error messages
-- Built-in COCO-80 labels if you don't provide a labels file
-- Camera listing, resolution control, FPS overlay
-- Save screenshots (press 's') or record video (--record out.mp4)
+detect_cam.py — robust TFLite live detection (USB webcam, Raspberry Pi friendly)
 
-Keys in window:
-  q: quit
-  s: save a frame as PNG in ./frames/
+v1.2.0
+
+Features
+- Hard-coded GStreamer pipeline for /dev/video0 with safe V4L2 fallback
+- Works with tflite_runtime OR tensorflow.lite (auto-fallback)
+- Robust model/labels path resolution (expands ~, searches ./, ./models, script dir, and ~/vision/notes/ssd_mobilenet_v1)
+- Built-in COCO-80 labels if no label file is found
+- Camera listing, FPS overlay, rotate/flip, optional MP4 recording
+- Optional --pipeline to override the default GStreamer pipeline
 """
 
 import argparse
 import sys
 import time
 from pathlib import Path
-from typing import Optional, Tuple
+from typing import Optional, Tuple, List
 
 import numpy as np
 import cv2
 
+
 # --------------------------
-# Label handling (built-in COCO-80)
+# Built-in COCO-80 labels (fallback)
 # --------------------------
 COCO80 = [
     "person","bicycle","car","motorcycle","airplane","bus","train","truck","boat","traffic light",
@@ -41,7 +38,8 @@ COCO80 = [
     "hair drier","toothbrush"
 ]
 
-def load_labels(labels_path: Optional[Path]) -> Tuple[list, bool]:
+
+def load_labels(labels_path: Optional[Path]) -> Tuple[List[str], bool]:
     """
     Returns (labels, has_background_zero)
     has_background_zero=True if label[0] is a background placeholder like '???'
@@ -49,14 +47,14 @@ def load_labels(labels_path: Optional[Path]) -> Tuple[list, bool]:
     if labels_path and labels_path.is_file():
         with open(labels_path, "r", encoding="utf-8") as f:
             labels = [ln.strip() for ln in f if ln.strip()]
-        # Heuristic: some labelmaps start with '???'
         has_bg = bool(labels and labels[0] in ("???", "background", "__background__"))
         return labels, has_bg
     # Fallback to built-in COCO-80 (no explicit background)
     return COCO80, False
 
+
 # --------------------------
-# TFLite interpreter loader
+# TFLite interpreter loader (tflite_runtime → tensorflow fallback)
 # --------------------------
 def try_import_interpreter(edgetpu: bool):
     """
@@ -64,9 +62,8 @@ def try_import_interpreter(edgetpu: bool):
     Returns (InterpreterClass, delegates_list)
     """
     delegates = []
-    # Try tflite_runtime
     try:
-        from tflite_runtime.interpreter import Interpreter, load_delegate
+        from tflite_runtime.interpreter import Interpreter, load_delegate  # type: ignore
         if edgetpu:
             try:
                 delegates = [load_delegate("libedgetpu.so.1")]
@@ -77,64 +74,100 @@ def try_import_interpreter(edgetpu: bool):
     except Exception:
         pass
 
-    # Fallback to full TensorFlow
     try:
         from tensorflow.lite import Interpreter  # type: ignore
-        # EdgeTPU with TF (rare), typically not supported this way
+        # EdgeTPU via TF is uncommon; skip delegate here
         return Interpreter, []
     except Exception as e:
         print("[error] Could not import TFLite interpreter from tflite_runtime or tensorflow.")
         print("Install one of:\n  pip3 install tflite-runtime\n  OR\n  pip3 install tensorflow")
         raise e
 
+
 # --------------------------
-# Model + label path resolution
+# Path resolution helpers
 # --------------------------
-def resolve_path(user_path: Optional[str], default_name: str) -> Optional[Path]:
+def resolve_path(user_path: Optional[str], default_name: str, extra_dirs: Optional[List[Path]] = None) -> Optional[Path]:
     """
-    Return the first existing candidate path or None if not found.
     Search order:
-      1) direct user_path
-      2) CWD
-      3) script_dir
-      4) script_dir/models
-      5) CWD/models
+      - user-provided path (expanded)
+      - CWD, ./models, script dir, script_dir/models
+      - any extra_dirs passed in
+      - default_name in the same search roots
     """
     here = Path(__file__).resolve().parent
     cwd = Path.cwd()
+    roots = [cwd, cwd / "models", here, here / "models"]
+    if extra_dirs:
+        roots.extend(extra_dirs)
 
-    candidates = []
     if user_path:
-        p = Path(user_path)
-        candidates.append(p)
-        if not p.is_absolute():
-            candidates.append(here / user_path)
-            candidates.append(here / "models" / user_path)
-            candidates.append(cwd / user_path)
-            candidates.append(cwd / "models" / user_path)
-    else:
-        candidates.extend([
-            cwd / default_name,
-            cwd / "models" / default_name,
-            here / default_name,
-            here / "models" / default_name,
-        ])
+        p = Path(user_path).expanduser()
+        if p.is_file():
+            return p
+        for r in roots:
+            c = (r / user_path).expanduser()
+            if c.is_file():
+                return c
+
+    for r in roots:
+        c = (r / default_name).expanduser()
+        if c.is_file():
+            return c
+
+    return None
+
+
+def resolve_model(model_arg: Optional[str]) -> Path:
+    """
+    Find a usable TFLite model by checking:
+      - user-provided path
+      - typical locations
+      - ~/vision/notes/ssd_mobilenet_v1/{detect.tflite, ssd_mobilenet_detect.tflite}
+    """
+    extra = [Path("~/vision/notes/ssd_mobilenet_v1").expanduser()]
+    # Prefer Dylan's default model name first
+    candidates = []
+    if model_arg:
+        candidates.append(Path(model_arg).expanduser())
+
+    # Default names we will try
+    common_names = ["detect.tflite", "ssd_mobilenet_detect.tflite"]
+
+    # Build candidate list from search dirs
+    here = Path(__file__).resolve().parent
+    cwd = Path.cwd()
+    search_dirs = [cwd, cwd / "models", here, here / "models"] + extra
+
+    for d in search_dirs:
+        for name in common_names:
+            candidates.append(d / name)
 
     for c in candidates:
         if c.is_file():
             return c
-    return None
+
+    # If nothing found, construct a helpful message
+    tried = "\n  ".join(str(c) for c in candidates[:16])
+    raise SystemExit(
+        "❌ Could not find a TFLite model. Tried:\n  " + tried +
+        "\n👉 Fix by passing --model /full/path/to/your_model.tflite "
+        "or placing the file at ./models/detect.tflite"
+    )
+
+
+def resolve_labels(labels_arg: Optional[str]) -> Optional[Path]:
+    extra = [Path("~/vision/notes/ssd_mobilenet_v1").expanduser()]
+    p = resolve_path(labels_arg, "labelmap.txt", extra_dirs=extra)
+    return p if p and p.is_file() else None
+
 
 # --------------------------
-# SSD-style postprocessing
+# SSD-style output mapping
 # --------------------------
-def extract_output(interpreter):
-    """
-    Return a dict with 'boxes','classes','scores','count' tensor indices (by best-effort name match).
-    """
+def get_output_indices(interpreter):
     details = interpreter.get_output_details()
     keys = {"boxes": None, "classes": None, "scores": None, "count": None}
-    # Best-effort by name:
     for i, d in enumerate(details):
         name = d.get("name", "").lower()
         if "box" in name:
@@ -145,46 +178,52 @@ def extract_output(interpreter):
             keys["scores"] = i
         elif "num" in name or "count" in name:
             keys["count"] = i
-    # If not found by name, assume canonical order
     if any(v is None for v in keys.values()):
         if len(details) >= 4:
             keys = {"boxes": 0, "classes": 1, "scores": 2, "count": 3}
     return keys
 
-def draw_detections(frame, detections, labels, has_bg_zero, threshold):
+
+def draw_dets(frame, dets, labels, has_bg_zero, thr):
     h, w = frame.shape[:2]
-    for y_min, x_min, y_max, x_max, cls_id, score in detections:
-        if score < threshold:
+    for y1, x1, y2, x2, cls_id, score in dets:
+        if score < thr:
             continue
-        # Classes can be float; cast safely
         c = int(cls_id)
-        # Adjust index if labels start at 1 or 0
+        # Map class index to label sensibly
         if has_bg_zero:
-            # labels[0] is background, classes are typically 1-based
-            label_idx = c
+            idx = c
         else:
-            # Many COCO-80 label files are 1..80, but some are 0..79.
-            # If index equals len(labels), clamp; else map best-effort:
-            label_idx = c
-            if label_idx >= len(labels):
-                label_idx = max(0, min(len(labels) - 1, c - 1))
-        name = labels[label_idx] if 0 <= label_idx < len(labels) else f"id:{c}"
+            idx = c if c < len(labels) else max(0, min(len(labels) - 1, c - 1))
+        name = labels[idx] if 0 <= idx < len(labels) else f"id:{c}"
 
-        # Convert normalized boxes -> pixels
-        x1, y1 = int(x_min * w), int(y_min * h)
-        x2, y2 = int(x_max * w), int(y_max * h)
-
-        cv2.rectangle(frame, (x1, y1), (x2, y2), (0, 180, 255), 2)
+        X1, Y1 = int(x1 * w), int(y1 * h)
+        X2, Y2 = int(x2 * w), int(y2 * h)
+        cv2.rectangle(frame, (X1, Y1), (X2, Y2), (0, 180, 255), 2)
         txt = f"{name} {score:.2f}"
-        (tw, th), bl = cv2.getTextSize(txt, cv2.FONT_HERSHEY_SIMPLEX, 0.5, 1)
-        cv2.rectangle(frame, (x1, y1 - th - 6), (x1 + tw + 2, y1), (0, 180, 255), -1)
-        cv2.putText(frame, txt, (x1 + 1, y1 - 4), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (25, 25, 25), 1, cv2.LINE_AA)
+        (tw, th), _ = cv2.getTextSize(txt, cv2.FONT_HERSHEY_SIMPLEX, 0.5, 1)
+        cv2.rectangle(frame, (X1, Y1 - th - 6), (X1 + tw + 2, Y1), (0, 180, 255), -1)
+        cv2.putText(frame, txt, (X1 + 1, Y1 - 4), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (25, 25, 25), 1, cv2.LINE_AA)
+
 
 # --------------------------
-# Camera utilities
+# Camera helpers (GStreamer + V4L2 fallback)
 # --------------------------
-def list_cameras(max_index=5):
-    print("Scanning cameras...")
+DEFAULT_PIPELINE = (
+    "v4l2src device=/dev/video0 ! "
+    "video/x-raw,width=1280,height=720,framerate=30/1 ! "
+    "videoconvert ! appsink"
+)
+# For MJPEG webcams, this can be smoother:
+# DEFAULT_PIPELINE = (
+#     "v4l2src device=/dev/video0 ! "
+#     "image/jpeg,width=1280,height=720,framerate=30/1 ! "
+#     "jpegdec ! videoconvert ! appsink"
+# )
+
+
+def list_cameras(max_index=8):
+    print("Scanning cameras (V4L2 indices)…")
     found = []
     for i in range(max_index + 1):
         cap = cv2.VideoCapture(i)
@@ -194,123 +233,111 @@ def list_cameras(max_index=5):
                 h, w = frame.shape[:2]
                 print(f"  [{i}] OK  {w}x{h}")
                 found.append(i)
-            else:
-                print(f"  [{i}] Opened but no frame")
         cap.release()
     if not found:
-        print("No cameras found. If you're on Raspberry Pi with libcamera, ensure V4L2 compatibility is enabled.")
+        print("No V4L2 cameras detected. If you have a Pi Camera, use libcamera or a GStreamer pipeline.")
 
-def open_camera(_src: str, _width: int, _height: int, _fps: int, *args, **_kwargs):
-    pipeline = (
-        "v4l2src device=/dev/video0 ! "
-        "video/x-raw, width=1280, height=720, framerate=30/1 ! "
-        "videoconvert ! appsink"
-    )
-    print["using hard coded line"]
-    cap = cv2.VideoCapture(pipeline, cv2.CAP_GSTREAMER)
+
+def open_camera(pipeline: Optional[str], width: int, height: int, fps: int):
+    use_pipeline = (pipeline or DEFAULT_PIPELINE)
+
+    if "appsink" not in use_pipeline:
+        print("[warn] Supplied pipeline missing 'appsink' at the end; OpenCV may not read frames.")
+
+    print("[info] Trying GStreamer pipeline:")
+    print("       ", use_pipeline)
+    cap = cv2.VideoCapture(use_pipeline, cv2.CAP_GSTREAMER)
+    if cap.isOpened():
+        return cap
+
+    print("[warn] GStreamer pipeline failed to open. Falling back to V4L2 /dev/video0")
+    cap = cv2.VideoCapture(0, cv2.CAP_V4L2)
+    if width > 0 and height > 0:
+        cap.set(cv2.CAP_PROP_FRAME_WIDTH, float(width))
+    if height > 0:
+        cap.set(cv2.CAP_PROP_FRAME_HEIGHT, float(height))
+    if fps > 0:
+        cap.set(cv2.CAP_PROP_FPS, float(fps))
     return cap
 
-    #    idx = int(src)
-    #    cap = cv2.VideoCapture(idx)
-    #except ValueError:
-    #    # Treat as path/URL
-    #    cap = cv2.VideoCapture(src)
-
-    #if width > 0 and height > 0:
-    #    cap.set(cv2.CAP_PROP_FRAME_WIDTh, float(width))
-    #    cap.set(cv2.CAP_PROP_FRAME_HEIGHT, float(height))
-    #if fps > 0:
-    #    cap.set(cv2.CAP_PROP_FPS, float(fps))
-    #return cap
 
 # --------------------------
 # Main
 # --------------------------
 def main():
     ap = argparse.ArgumentParser(formatter_class=argparse.ArgumentDefaultsHelpFormatter)
-    ap.add_argument("-m", "--model", type=str, default="ssd_mobilenet_detect.tflite",
-                    help="Path to TFLite model (absolute or relative)")
+    # Default model set to Dylan's exact path/name
+    ap.add_argument(
+        "-m", "--model",
+        type=str,
+        default=str(Path("~/vision/notes/ssd_mobilenet_v1/detect.tflite").expanduser()),
+        help="Path to TFLite model (absolute or relative). By default, uses your detect.tflite."
+    )
     ap.add_argument("-l", "--labels", type=str, default="labelmap.txt",
-                    help="Path to labels file (optional; built-in COCO-80 used if missing)")
-    ap.add_argument("-s", "--source", type=str, default="0",
-                    help="Camera index (e.g., '0') or video file/URL")
-    ap.add_argument("--width", type=int, default=1280, help="Capture width")
-    ap.add_argument("--height", type=int, default=720, help="Capture height")
-    ap.add_argument("--cam-fps", type=int, default=30, help="Requested camera FPS")
+                    help="Path to labels file (optional; built-in COCO-80 is used if missing)")
+    ap.add_argument("--pipeline", type=str, default="",
+                    help="GStreamer pipeline to use (optional). If empty, a robust default is used.")
+    ap.add_argument("--width", type=int, default=1280, help="Capture width (V4L2 fallback only)")
+    ap.add_argument("--height", type=int, default=720, help="Capture height (V4L2 fallback only)")
+    ap.add_argument("--cam-fps", type=int, default=30, help="Requested camera FPS (V4L2 fallback only)")
     ap.add_argument("-t", "--threshold", type=float, default=0.5, help="Score threshold [0..1]")
     ap.add_argument("--edgetpu", action="store_true", help="Try to use EdgeTPU delegate (Coral USB)")
-    ap.add_argument("--record", type=str, default="", help="Record output to video file (e.g., out.mp4)")
+    ap.add_argument("--record", type=str, default="", help="Record output to MP4 (e.g., out.mp4)")
     ap.add_argument("--rotate", type=int, default=0, choices=[0, 90, 180, 270], help="Rotate display (deg)")
     ap.add_argument("--flip", type=str, default="", choices=["", "h", "v", "hv"], help="Flip image")
-    ap.add_argument("--list-cams", action="store_true", help="List available cameras and exit")
+    ap.add_argument("--list-cams", action="store_true", help="List available V4L2 cameras and exit")
     args = ap.parse_args()
 
     if args.list_cams:
-        list_cameras(8)
+        list_cameras()
         return
 
-    # Resolve model/labels
-    model_path = Path("~/vision/notes/ssd_mobilenet_v1/detect.tflite").expanduser()
-    labels_path = Path("~/vision/notes/ssd_mobilenet_v1/labelmap.txt").expanduser()
-
-    if not model_path:
-        print("❌ Could not find a TFLite model.\n"
-              "Searched (relative to CWD and script):\n"
-              f"  - {args.model}\n  - ./models/{args.model}\n  - ./ssd_mobilenet_detect.tflite\n  - ./models/ssd_mobilenet_detect.tflite\n")
-        print("👉 Fix it by:\n"
-              "   1) Passing --model /full/path/to/your_model.tflite\n"
-              "   2) Or placing your model at ./models/ssd_mobilenet_detect.tflite\n")
-        sys.exit(1)
-
+    # Resolve model & labels
+    model_path = resolve_model(args.model)
+    labels_path = resolve_labels(args.labels)
     labels, has_bg_zero = load_labels(labels_path)
-    if labels_path and labels_path.is_file():
+    if labels_path:
         print(f"[info] Using label file: {labels_path}")
     else:
-        print("[info] No labels file found; using built-in COCO-80 labels.")
+        print("[info] Using built-in COCO-80 labels.")
 
-    # Interpreter
+    # Load TFLite model
     Interpreter, delegates = try_import_interpreter(args.edgetpu)
     interpreter = Interpreter(model_path=str(model_path), experimental_delegates=delegates)
     interpreter.allocate_tensors()
-
     in_details = interpreter.get_input_details()
     out_details = interpreter.get_output_details()
     ih, iw = in_details[0]["shape"][1], in_details[0]["shape"][2]
     in_dtype = in_details[0]["dtype"]
-    in_quant = in_details[0].get("quantization", (0.0, 0))  # (scale, zero_point)
-
-    print(f"[info] Model: {model_path.name} | input {iw}x{ih} dtype={in_dtype} quant={in_quant}")
-    outs = extract_output(interpreter)
+    in_quant = in_details[0].get("quantization", (0.0, 0))
+    outs = get_output_indices(interpreter)
+    print(f"[info] Model: {model_path} | input {iw}x{ih} dtype={in_dtype} quant={in_quant}")
 
     # Camera
-    cap = cv2.VideoCapture(pipeline, cv2.CAP_GSTREAMER)
-    pipeline = (
-        "v4l2src device=/dev/video0 ! "
-        "video/x-raw, width=1280, height=720, framerate=30/1 ! "
-        "videoconvert ! appsink"
-    )
-    #cap = open_camera(args.source, args.width, args.height, args.cam_fps)
-    #if not cap.isOpened():
-    #    print(f"[error] Could not open video source: {args.source}")
-    #    sys.exit(1)
+    cap = open_camera(args.pipeline, args.width, args.height, args.cam_fps)
+    if not cap.isOpened():
+        print("[error] Could not open camera via GStreamer pipeline or V4L2 fallback.")
+        sys.exit(1)
 
-    # Video writer (optional)
+    # Optional recorder
     writer = None
     if args.record:
-        fourcc = cv2.VideoWriter_fourcc(*"mp4v")  # widely supported
-        writer = cv2.VideoWriter(args.record, fourcc, float(args.cam_fps if args.cam_fps > 0 else 30),
-                                 (int(cap.get(cv2.CAP_PROP_FRAME_WIDTH)), int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))))
-        if not writer.isOpened():
-            print(f"[warn] Could not open writer for {args.record}; disabling recording.")
-            writer = None
-        else:
+        fourcc = cv2.VideoWriter_fourcc(*"mp4v")
+        out_w = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
+        out_h = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
+        out_fps = float(args.cam_fps if args.cam_fps > 0 else 30)
+        writer = cv2.VideoWriter(args.record, fourcc, out_fps, (out_w, out_h))
+        if writer.isOpened():
             print(f"[info] Recording to {args.record}")
+        else:
+            print(f"[warn] Failed to open writer for {args.record}; recording disabled.")
+            writer = None
 
-    # Main loop
+    # Inference loop
+    Path("frames").mkdir(exist_ok=True)
     last_t = time.time()
     fps = 0.0
-    frame_count = 0
-    Path("frames").mkdir(exist_ok=True)
+    n = 0
 
     while True:
         ok, frame = cap.read()
@@ -318,69 +345,52 @@ def main():
             print("[warn] No frame from camera.")
             break
 
-        # Optional rotation/flip for convenience
         if args.rotate == 90:
             frame = cv2.rotate(frame, cv2.ROTATE_90_CLOCKWISE)
         elif args.rotate == 180:
             frame = cv2.rotate(frame, cv2.ROTATE_180)
         elif args.rotate == 270:
             frame = cv2.rotate(frame, cv2.ROTATE_90_COUNTERCLOCKWISE)
-
         if args.flip:
             if "h" in args.flip:
-                frame = cv2.flip(frame, 1)  # horizontal
+                frame = cv2.flip(frame, 1)
             if "v" in args.flip:
-                frame = cv2.flip(frame, 0)  # vertical
+                frame = cv2.flip(frame, 0)
 
-        # Prepare input
         rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
         inp = cv2.resize(rgb, (iw, ih), interpolation=cv2.INTER_LINEAR)
-
-        if in_dtype == np.uint8:
+        if str(in_dtype).endswith("uint8"):
             inp = np.asarray(inp, dtype=np.uint8)
         else:
-            # Most float models expect [0,1]
             inp = (np.asarray(inp, dtype=np.float32) / 255.0)
 
-        # Invoke
         interpreter.set_tensor(in_details[0]["index"], np.expand_dims(inp, 0))
         interpreter.invoke()
-
-        # Fetch outputs
         boxes = interpreter.get_tensor(out_details[outs["boxes"]]["index"])[0]
         classes = interpreter.get_tensor(out_details[outs["classes"]]["index"])[0]
         scores = interpreter.get_tensor(out_details[outs["scores"]]["index"])[0]
-        # Some models provide a count tensor; not strictly needed
-        # count = int(interpreter.get_tensor(out_details[outs["count"]]["index"])[0]) if outs["count"] is not None else len(scores)
 
-        detections = []
-        for i in range(len(scores)):
-            y_min, x_min, y_max, x_max = boxes[i]
-            detections.append((y_min, x_min, y_max, x_max, classes[i], scores[i]))
+        dets = [(b[0], b[1], b[2], b[3], classes[i], scores[i]) for i, b in enumerate(boxes)]
+        draw_dets(frame, dets, labels, has_bg_zero, args.threshold)
 
-        # Draw
-        draw_detections(frame, detections, labels, has_bg_zero, args.threshold)
-
-        # FPS
-        frame_count += 1
+        # FPS overlay
+        n += 1
         now = time.time()
         if now - last_t >= 0.5:
-            fps = frame_count / (now - last_t)
-            frame_count = 0
+            fps = n / (now - last_t)
+            n = 0
             last_t = now
         cv2.putText(frame, f"FPS: {fps:5.1f}", (10, 24), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (20, 220, 20), 2, cv2.LINE_AA)
 
-        # Show
+        # Show & record
         cv2.imshow("detect_cam", frame)
-
-        # Record
         if writer:
             writer.write(frame)
 
         key = cv2.waitKey(1) & 0xFF
         if key == ord('q'):
             break
-        elif key == ord('s'):
+        if key == ord('s'):
             out = Path("frames") / f"frame_{int(time.time())}.png"
             cv2.imwrite(str(out), frame)
             print(f"[info] Saved {out}")
@@ -389,6 +399,7 @@ def main():
     if writer:
         writer.release()
     cv2.destroyAllWindows()
+
 
 if __name__ == "__main__":
     main()
