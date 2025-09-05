@@ -1,7 +1,9 @@
 #!/usr/bin/env python3
 """
 detect_cam.py — simple, robust TFLite live detection
-
+#########################################################################################################
+##########################################                    v1.1.0                    ##########################################
+#########################################################################################################
 Features
 - Works with tflite_runtime OR tensorflow.lite (auto-fallback)
 - Optional EdgeTPU delegate if available (--edgetpu)
@@ -198,20 +200,28 @@ def list_cameras(max_index=5):
     if not found:
         print("No cameras found. If you're on Raspberry Pi with libcamera, ensure V4L2 compatibility is enabled.")
 
-def open_camera(src: str, width: int, height: int, fps: int):
-    try:
-        idx = int(src)
-        cap = cv2.VideoCapture(idx)
-    except ValueError:
-        # Treat as path/URL
-        cap = cv2.VideoCapture(src)
-
-    if width > 0 and height > 0:
-        cap.set(cv2.CAP_PROP_FRAME_WIDTH, float(width))
-        cap.set(cv2.CAP_PROP_FRAME_HEIGHT, float(height))
-    if fps > 0:
-        cap.set(cv2.CAP_PROP_FPS, float(fps))
+def open_camera(_src: str, _width: int, _height: int, _fps: int, *args, **_kwargs):
+    pipeline = (
+        "v4l2src device=/dev/video0 ! "
+        "video/x-raw, width=1280, height=720, framerate=30/1 ! "
+        "videoconvert ! appsink"
+    )
+    print["using hard coded line"]
+    cap = cv2.VideoCapture(pipeline, cv2.CAP_GSTREAMER)
     return cap
+
+    #    idx = int(src)
+    #    cap = cv2.VideoCapture(idx)
+    #except ValueError:
+    #    # Treat as path/URL
+    #    cap = cv2.VideoCapture(src)
+
+    #if width > 0 and height > 0:
+    #    cap.set(cv2.CAP_PROP_FRAME_WIDTh, float(width))
+    #    cap.set(cv2.CAP_PROP_FRAME_HEIGHT, float(height))
+    #if fps > 0:
+    #    cap.set(cv2.CAP_PROP_FPS, float(fps))
+    #return cap
 
 # --------------------------
 # Main
@@ -240,8 +250,8 @@ def main():
         return
 
     # Resolve model/labels
-    model_path = resolve_path(args.model, "ssd_mobilenet_detect.tflite")
-    labels_path = resolve_path(args.labels, "labelmap.txt")
+    model_path = Path("~/vision/notes/ssd_mobilenet_v1/detect.tflite").expanduser()
+    labels_path = Path("~/vision/notes/ssd_mobilenet_v1/labelmap.txt").expanduser()
 
     if not model_path:
         print("❌ Could not find a TFLite model.\n"
@@ -273,10 +283,16 @@ def main():
     outs = extract_output(interpreter)
 
     # Camera
-    cap = open_camera(args.source, args.width, args.height, args.cam_fps)
-    if not cap.isOpened():
-        print(f"[error] Could not open video source: {args.source}")
-        sys.exit(1)
+    cap = cv2.VideoCapture(pipeline, cv2.CAP_GSTREAMER)
+    pipeline = (
+        "v4l2src device=/dev/video0 ! "
+        "video/x-raw, width=1280, height=720, framerate=30/1 ! "
+        "videoconvert ! appsink"
+    )
+    #cap = open_camera(args.source, args.width, args.height, args.cam_fps)
+    #if not cap.isOpened():
+    #    print(f"[error] Could not open video source: {args.source}")
+    #    sys.exit(1)
 
     # Video writer (optional)
     writer = None
