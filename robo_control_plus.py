@@ -13,10 +13,10 @@ ROBOT_BAUD = 115200
 
 # Define your named poses (joint angles in degrees)
 POSES: Dict[str, List[float]] = {
-    "HOME": [0, 0, 0, 0, 0, 0],
-    "SAFE": [0, -45, 90, 0, 45, 0],      # <-- Replace with tested safe pose
-    "LEFT": [-30, -20, 60, 0, 20, 0],
-    "RIGHT": [30, -20, 60, 0, 20, 0],
+    "HOME": [0, 0, 0, 80, 90, 0],
+    "SAFE": [131, 0, 0, 70, 90, 0],      # <-- Replace with tested safe pose
+    "LEFT": [68, 0, 0, 80, 89, 0],
+    "RIGHT": [121, 0, 0, 80, 100, 50],
 }
 
 SPEED = 15         # keep slow for safety (0-100)
@@ -28,7 +28,7 @@ DRY_RUN = True     # <-- START HERE TRUE; set False when you're ready
 FOLLOW_RATE_HZ = 5.0          # how often we send corrections
 YAW_KP_DEG_PER_ERR = 12.0     # deg of joint-1 per unit normalized error ([-1..1])
 YAW_MAX_STEP_DEG = 4.0        # max deg per control tick
-YAW_LIMITS_DEG = (-175.0, 175.0)  # safety clamp for joint-1 range
+YAW_LIMITS_DEG = (-100.0, 100.0)  # safety clamp for joint-1 range
 
 class RobotController:
     """
