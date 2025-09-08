@@ -118,8 +118,8 @@ def robot_move_to_safe_pose() -> None:
     try:
         from pymycobot.mycobot import MyCobot
         mc = MyCobot('/dev/ttyAMA0', 115200)  # adapt if using USB or different port
-        safe_angles = [0, 0, 0, 0, 0, 0]      # <-- replace with your tested safe angles
-        mc.send_angles(safe_angles, 20)       # move slowly
+        #safe_angles = [0, 0, 0, 0, 0, 0]      # <-- replace with your tested safe angles
+        #mc.send_angles(safe_angles, 20)       # move slowly
     except Exception as e:
         print(f"[WARN] Robot move skipped: {e}")
 

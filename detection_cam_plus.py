@@ -250,6 +250,7 @@ def main() -> int:
             key = cv2.waitKey(1) & 0xFF
             if key in (ord('q'), 27):   # q/ESC quit
                 break
+            
             if key == ord('x'):         # emergency stop
                 rc.emergency_stop()
                 locked = False
@@ -287,14 +288,16 @@ def main() -> int:
                         if isinstance(j, list) and len(j) == 6:
                             j[0] +=10
                             mc.send_angles(j, 20)
+                            mc.focus_all_servos()
                             print("[TEST] J1 += 10° (should pan RIGHT in view)")
                 except Exception as e:
                     print("[TEST] jog failed:", e)
 
-            if key == ord('j'):  # expect yaw to turn left in the camera view
+            if key == ord('k'):  # expect yaw to turn left in the camera view
                 try:
                     mc = rc._mc
                     if mc:
+                        mc.focus_all_servos()
                         j = mc.get_angles()
                         if isinstance(j, list) and len(j) == 6:
                             j[0] -=10
@@ -302,6 +305,37 @@ def main() -> int:
                             print("[TEST] J1 -= 10° (should pan LEFT in view)")
                 except Exception as e:
                     print("[TEST] jog failed:", e)
+
+            if key == ord('c'):         # move camera into postion
+                try:
+                    mc = rc._mc
+                    if mc:
+                        mc.send_angles([100,0,0,70,90,0],5)  #point cam
+                except Exception as e:
+                    print("[WARN] error", e)
+            
+            if key == ord('a'):
+                try:
+                    mc = rc._mc
+                    if mc:
+                        j = mc.get_angles()
+                        if isinstance(j, list) and len(j) == 6:
+                            j_new = j[:] # copy
+                            #keep j1 as is
+                            # esure the rest are (0,0,0,70,90,0)
+                            MIN_POS = 1.0 #OPTIONAL DEGREES THRESHOLD
+                            if j_new[1] <= 0.0:
+                                j_new[1] = MIN_POS
+                            if j_new[2] <= 0.0:
+                                j_new[2] = MIN_POS
+                            j_new[3] <= 70.0
+                            j_new[4] <= 90.0
+                            j_new[5] = 0.0
+                            mc.send_angles(j_new, 20)  # move slowly
+                            print("STAND UP")
+
+                except Exception as e:
+                    print("[WARN] CANT STAND UP", e)
 
             frame_idx += 1
 

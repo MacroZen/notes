@@ -14,10 +14,10 @@ ROBOT_BAUD = 115200
 
 # Define your named poses (joint angles in degrees)
 POSES: Dict[str, List[float]] = {
-    "HOME": [0, 0, 0, 80, 90, 0],
-    "SAFE": [131, 0, 0, 70, 90, 0],      # <-- Replace with tested safe pose
-    "LEFT": [68, 0, 0, 80, 89, 0],
-    "RIGHT": [121, 0, 0, 80, 100, 50],
+#    "HOME": [0, 0, 0, 80, 90, 0],
+#    "SAFE": [131, 0, 0, 70, 90, 0],      # <-- Replace with tested safe pose
+#    "LEFT": [68, 0, 0, 80, 89, 0],
+#    "RIGHT": [121, 0, 0, 80, 100, 50],
 }
 
 SPEED = 5         # keep slow for safety (0-100)
@@ -59,15 +59,9 @@ class RobotController:
             time.sleep (0.5)  # wait for connection
             try:
                 self._mc.power_on()
-                #self._mc.set_fresh_mode(0) # 0=normal, 1=fresh
                 time.sleep (0.5)
+                self._mc.focus_all_servos()
                 print(f"[robot] power on: {self._mc.is_power_on()}")
-                for sid in range(1, 7):
-                    try:
-                        self._mc.focuse_servos(sid)
-                        time.sleep(0.2)
-                    except Exception:
-                        print(f"[Robot][WARN] Could not focus servo {sid}")
                 print("[robot] ready")
             except Exception as e:
                 print(f"[Robot][WARN] Could not init MyCobot: {e}. DRY_RUN enabled.")
@@ -181,7 +175,8 @@ class RobotController:
                             continue
                         j1 = joints[0] + delta
                         j1 = max(YAW_LIMITS_DEG[0], min(YAW_LIMITS_DEG[1], j1))
-                        new_angles = [j1, joints[1], joints[2], joints[3], joints[4], joints[5]]
+                        #new_angles = [j1, joints[1], joints[2], joints[3], joints[4], joints[5]]
+                        new_angles = [j1, joints[1], joints[2], 75, 90, joints[5]]
                         self._mc.send_angles(new_angles, SPEED)
                     except Exception as e:
                         print(f"[Robot][WARN] Follow step failed: {e}")
