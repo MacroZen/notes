@@ -4,8 +4,8 @@ import time, sys
 from typing import List, Optional, Tuple
 import cv2
 
-from presence_trigger import PresenceTrigger, Detection
-import presence_trigger as pt_config
+from person_trigger import PresenceTrigger, Detection
+import person_trigger as pt_config
 from robot_controls import RobotController
 
 # =========================
