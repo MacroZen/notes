@@ -19,16 +19,16 @@ POSES: Dict[str, List[float]] = {
     "RIGHT": [121, 0, 0, 80, 100, 50],
 }
 
-SPEED = 15         # keep slow for safety (0-100)
-DRY_RUN = True     # <-- START HERE TRUE; set False when you're ready
+SPEED = 5         # keep slow for safety (0-100)
+DRY_RUN = False     # <-- START HERE TRUE; set False when you're ready
 
 # =========================
 # FOLLOW CONTROLLER CONFIG
 # =========================
 FOLLOW_RATE_HZ = 5.0          # how often we send corrections
-YAW_KP_DEG_PER_ERR = 12.0     # deg of joint-1 per unit normalized error ([-1..1])
-YAW_MAX_STEP_DEG = 4.0        # max deg per control tick
-YAW_LIMITS_DEG = (-100.0, 100.0)  # safety clamp for joint-1 range
+YAW_KP_DEG_PER_ERR = 16.0     # deg of joint-1 per unit normalized error ([-1..1])
+YAW_MAX_STEP_DEG = 8.0        # max deg per control tick
+YAW_LIMITS_DEG = (-130.0, 130.0)  # safety clamp for joint-1 range
 
 class RobotController:
     """
@@ -49,13 +49,20 @@ class RobotController:
 
         self._mc = None
         if not self.dry_run:
+            from pymycobot.mycobot import MyCobot
+            self._mc = MyCobot(port, baud)
+            time.sleep (0.5)  # wait for connection
             try:
-                from pymycobot.mycobot import MyCobot
-                self._mc = MyCobot(port, baud)
-                print(f"[Robot] Connected on {port} @ {baud}")
+                self._mc.power_on()
+                time.sleep (0.5)
+                print(f"[robot] power on: {self._mc.is_power_on()}")
             except Exception as e:
                 print(f"[Robot][WARN] Could not init MyCobot: {e}. DRY_RUN enabled.")
                 self.dry_run = True
+        
+        if keyboard.is_pressed('1'):
+            g = [121.5,0,0,80.5,100,50]
+
 
     # ---------- lifecycle ----------
     def start(self):
