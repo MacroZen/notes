@@ -6,7 +6,7 @@ import cv2
 
 from person_trigger import PresenceTrigger, Detection
 import person_trigger as pt_config
-from robot_controls import RobotController
+from robo_control_plus import RobotController
 
 # =========================
 # TOGGLES
