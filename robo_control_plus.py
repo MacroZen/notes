@@ -145,38 +145,47 @@ class RobotController:
                 self._q.task_done()
 
     def _follow_loop(self):
-        period = 1.0 / FOLLOW_RATE_HZ
-        while not self._stop_evt.is_set():
-            time.sleep(period)
-            with self._follow_lock:
-                enabled = self._follow_enabled
-                err_x = self._follow_err_x
-            if not enabled:
-                continue
+        # (inside self._follow_loop)
+period = 1.0 / FOLLOW_RATE_HZ
+err_filt = 0.0
+while not self._stop_evt.is_set():
+    time.sleep(period)
+    with self._follow_lock:
+        enabled = self._follow_enabled
+        err = self._follow_err_x
+    if not enabled:
+        continue
+    # Smooth the error
+    err_filt = (1.0 - ERR_SMOOTH_ALPHA) * err_filt + ERR_SMOOTH_ALPHA * err
 
-            # Compute desired yaw delta
-            delta = YAW_KP_DEG_PER_ERR * err_x
-            if delta > 0:
-                delta = min(delta, YAW_MAX_STEP_DEG)
-            else:
-                delta = max(delta, -YAW_MAX_STEP_DEG)
+    # Deadband: ignore small errors near center
+    if abs(err_filt) < FOLLOW_ERR_DEADBAND:
+        continue
 
-            if self.dry_run or not self._mc:
-                print(f"[Robot][FOLLOW DRY] err_x={err_x:+.2f} -> yaw Δ={delta:+.2f} deg")
-                continue
+    # Proportional step
+    delta = YAW_KP_DEG_PER_ERR * err_filt
+    delta = max(-YAW_MAX_STEP_DEG, min(YAW_MAX_STEP_DEG, delta))
 
-            try:
-                # Read current joints, adjust joint-1 only
-                joints = self._mc.get_angles()  # degrees
-                if not joints or len(joints) != 6:
-                    print("[Robot][WARN] get_angles() failed")
-                    continue
-                j1 = joints[0] + delta
-                j1 = max(YAW_LIMITS_DEG[0], min(YAW_LIMITS_DEG[1], j1))
-                new_angles = [j1, joints[1], joints[2], joints[3], joints[4], joints[5]]
-                self._mc.send_angles(new_angles, SPEED)
-            except Exception as e:
-                print(f"[Robot][WARN] Follow step failed: {e}")
+    # Skip tiny steps (avoid jitter)
+    if abs(delta) < MIN_EFFECTIVE_STEP_DEG:
+        continue
+
+    if self.dry_run or not self._mc:
+        print(f"[Robot][FOLLOW DRY] err={err:+.2f} filt={err_filt:+.2f} -> Δyaw={delta:+.2f}°")
+        continue
+
+    try:
+        joints = self._mc.get_angles()
+        if not joints or len(joints) != 6:
+            print("[Robot][WARN] get_angles() failed")
+            continue
+        j1 = joints[0] + delta
+        j1 = max(YAW_LIMITS_DEG[0], min(YAW_LIMITS_DEG[1], j1))
+        new_angles = [j1, joints[1], joints[2], joints[3], joints[4], joints[5]]
+        self._mc.send_angles(new_angles, SPEED)
+    except Exception as e:
+        print(f"[Robot][WARN] Follow step failed: {e}")
+
 
     def _send_angles(self, angles: List[float]):
         if len(angles) != 6:
