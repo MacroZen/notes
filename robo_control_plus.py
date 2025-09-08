@@ -59,7 +59,7 @@ class RobotController:
             time.sleep (0.5)  # wait for connection
             try:
                 self._mc.power_on()
-                self._mc.set_fresh_mode(0) # 0=normal, 1=fresh
+                #self._mc.set_fresh_mode(0) # 0=normal, 1=fresh
                 time.sleep (0.5)
                 print(f"[robot] power on: {self._mc.is_power_on()}")
                 for sid in range(1, 7):
@@ -146,45 +146,45 @@ class RobotController:
 
     def _follow_loop(self):
         # (inside self._follow_loop)
-period = 1.0 / FOLLOW_RATE_HZ
-err_filt = 0.0
-while not self._stop_evt.is_set():
-    time.sleep(period)
-    with self._follow_lock:
-        enabled = self._follow_enabled
-        err = self._follow_err_x
-    if not enabled:
-        continue
-    # Smooth the error
-    err_filt = (1.0 - ERR_SMOOTH_ALPHA) * err_filt + ERR_SMOOTH_ALPHA * err
+                period = 1.0 / FOLLOW_RATE_HZ
+                err_filt = 0.0
+                while not self._stop_evt.is_set():
+                    time.sleep(period)
+                    with self._follow_lock:
+                        enabled = self._follow_enabled
+                        err = self._follow_err_x
+                    if not enabled:
+                        continue
+                    # Smooth the error
+                    err_filt = (1.0 - ERR_SMOOTH_ALPHA) * err_filt + ERR_SMOOTH_ALPHA * err
 
-    # Deadband: ignore small errors near center
-    if abs(err_filt) < FOLLOW_ERR_DEADBAND:
-        continue
+                    # Deadband: ignore small errors near center
+                    if abs(err_filt) < FOLLOW_ERR_DEADBAND:
+                        continue
+                    
+                    # Proportional step
+                    delta = YAW_KP_DEG_PER_ERR * err_filt
+                    delta = max(-YAW_MAX_STEP_DEG, min(YAW_MAX_STEP_DEG, delta))
 
-    # Proportional step
-    delta = YAW_KP_DEG_PER_ERR * err_filt
-    delta = max(-YAW_MAX_STEP_DEG, min(YAW_MAX_STEP_DEG, delta))
-
-    # Skip tiny steps (avoid jitter)
-    if abs(delta) < MIN_EFFECTIVE_STEP_DEG:
-        continue
-
-    if self.dry_run or not self._mc:
-        print(f"[Robot][FOLLOW DRY] err={err:+.2f} filt={err_filt:+.2f} -> Δyaw={delta:+.2f}°")
-        continue
-
-    try:
-        joints = self._mc.get_angles()
-        if not joints or len(joints) != 6:
-            print("[Robot][WARN] get_angles() failed")
-            continue
-        j1 = joints[0] + delta
-        j1 = max(YAW_LIMITS_DEG[0], min(YAW_LIMITS_DEG[1], j1))
-        new_angles = [j1, joints[1], joints[2], joints[3], joints[4], joints[5]]
-        self._mc.send_angles(new_angles, SPEED)
-    except Exception as e:
-        print(f"[Robot][WARN] Follow step failed: {e}")
+                    # Skip tiny steps (avoid jitter)
+                    if abs(delta) < MIN_EFFECTIVE_STEP_DEG:
+                        continue
+                    
+                    if self.dry_run or not self._mc:
+                        print(f"[Robot][FOLLOW DRY] err={err:+.2f} filt={err_filt:+.2f} -> Δyaw={delta:+.2f}°")
+                        continue
+                    
+                    try:
+                        joints = self._mc.get_angles()
+                        if not joints or len(joints) != 6:
+                            print("[Robot][WARN] get_angles() failed")
+                            continue
+                        j1 = joints[0] + delta
+                        j1 = max(YAW_LIMITS_DEG[0], min(YAW_LIMITS_DEG[1], j1))
+                        new_angles = [j1, joints[1], joints[2], joints[3], joints[4], joints[5]]
+                        self._mc.send_angles(new_angles, SPEED)
+                    except Exception as e:
+                        print(f"[Robot][WARN] Follow step failed: {e}")
 
 
     def _send_angles(self, angles: List[float]):
