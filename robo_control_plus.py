@@ -4,6 +4,7 @@ import threading
 import queue
 import time
 from typing import Dict, List, Optional
+#import keyboard  # for emergency stop key detection
 
 # =========================
 # ROBOT CONNECTION CONFIG
@@ -60,8 +61,8 @@ class RobotController:
                 print(f"[Robot][WARN] Could not init MyCobot: {e}. DRY_RUN enabled.")
                 self.dry_run = True
         
-        if keyboard.is_pressed('1'):
-            g = [121.5,0,0,80.5,100,50]
+        #if keyboard.is_pressed('1'):
+        #    g = [121.5,0,0,80.5,100,50]
 
 
     # ---------- lifecycle ----------

@@ -283,23 +283,25 @@ def main() -> int:
                 try:
                     mc = rc._mc
                     if mc:
-            j = mc.get_angles()
-            j[0] += 10
-            mc.send_angles(j, 20)
-            print("[TEST] J1 += 10° (should pan RIGHT in view)")
-    except Exception as e:
-        print("[TEST] jog failed:", e)
+                        j = mc.get_angles()
+                        if isinstance(j, list) and len(j) == 6:
+                            j[0] +=10
+                            mc.send_angles(j, 20)
+                            print("[TEST] J1 += 10° (should pan RIGHT in view)")
+                except Exception as e:
+                    print("[TEST] jog failed:", e)
 
-if key == ord('j'):  # expect yaw to turn left in the camera view
-    try:
-        mc = rc._mc
-        if mc:
-            j = mc.get_angles()
-            j[0] -= 10
-            mc.send_angles(j, 20)
-            print("[TEST] J1 -= 10° (should pan LEFT in view)")
-    except Exception as e:
-        print("[TEST] jog failed:", e)
+            if key == ord('j'):  # expect yaw to turn left in the camera view
+                try:
+                    mc = rc._mc
+                    if mc:
+                        j = mc.get_angles()
+                        if isinstance(j, list) and len(j) == 6:
+                            j[0] -=10
+                            mc.send_angles(j, 20)
+                            print("[TEST] J1 -= 10° (should pan LEFT in view)")
+                except Exception as e:
+                    print("[TEST] jog failed:", e)
 
             frame_idx += 1
 
