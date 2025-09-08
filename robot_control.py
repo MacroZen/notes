@@ -16,7 +16,7 @@ POSES: Dict[str, List[float]] = {
     "HOME": [0, 0, 0, 0, 0, 0],
     "SAFE": [0, -45, 90, 0, 45, 0],      # <-- Replace with tested safe pose
     "LEFT": [-30, -20, 60, 0, 20, 0],
-    "RIGHT": [30, -20, 60, 0, 20, 0],
+    "RIGHT": [121.5,0,0,80.5,100,50],
 }
 
 SPEED = 15         # keep slow for safety (0-100)
