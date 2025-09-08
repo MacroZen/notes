@@ -6,11 +6,11 @@ from typing import List, Optional
 
 import cv2
 
-from presence_trigger import PresenceTrigger, Detection
-import presence_trigger as pt_config
+from person_trigger import PresenceTrigger, Detection
+import person_trigger as pt_config
 
 # --- NEW: robot controls ---
-from robot_controls import RobotController
+from robot_control import RobotController
 
 # =========================
 # BASIC APP CONFIG
