@@ -26,10 +26,14 @@ DRY_RUN = False     # <-- START HERE TRUE; set False when you're ready
 # =========================
 # FOLLOW CONTROLLER CONFIG
 # =========================
-FOLLOW_RATE_HZ = 5.0          # how often we send corrections
-YAW_KP_DEG_PER_ERR = 16.0     # deg of joint-1 per unit normalized error ([-1..1])
-YAW_MAX_STEP_DEG = 8.0        # max deg per control tick
+FOLLOW_RATE_HZ = 3.0          # how often we send corrections
+YAW_KP_DEG_PER_ERR = 18.0     # deg of joint-1 per unit normalized error ([-1..1])
+YAW_MAX_STEP_DEG = 6.0        # max deg per control tick
 YAW_LIMITS_DEG = (-130.0, 130.0)  # safety clamp for joint-1 range
+FOLLOW_ERR_DEADBAND = 0.10   # ignore small errors 10% of frame width
+ERR_SMOOTH_ALPHA = 0.3       # LOWPASS filter alpha for error smoothing
+MIN_EFFECTIVE_STEP_DEG = 1.0  # if step smaller than this, skip it
+
 
 class RobotController:
     """
@@ -55,8 +59,16 @@ class RobotController:
             time.sleep (0.5)  # wait for connection
             try:
                 self._mc.power_on()
+                self._mc.set_fresh_mode(0) # 0=normal, 1=fresh
                 time.sleep (0.5)
                 print(f"[robot] power on: {self._mc.is_power_on()}")
+                for sid in range(1, 7):
+                    try:
+                        self._mc.focuse_servos(sid)
+                        time.sleep(0.2)
+                    except Exception:
+                        print(f"[Robot][WARN] Could not focus servo {sid}")
+                print("[robot] ready")
             except Exception as e:
                 print(f"[Robot][WARN] Could not init MyCobot: {e}. DRY_RUN enabled.")
                 self.dry_run = True
