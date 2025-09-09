@@ -34,6 +34,16 @@ FOLLOW_ERR_DEADBAND = 0.10   # ignore small errors 10% of frame width
 ERR_SMOOTH_ALPHA = 0.3       # LOWPASS filter alpha for error smoothing
 MIN_EFFECTIVE_STEP_DEG = 1.0  # if step smaller than this, skip it
 
+# safety joint limits per-joint (deg): [(min,max), ...]
+JOINT_LIMITS_DEG = [
+    YAW_LIMITS_DEG,    # joint-0 (yaw)
+    (-90.0, 90.0),     # joint-1
+    (-90.0, 90.0),     # joint-2
+    (0.0, 180.0),      # joint-3
+    (0.0, 180.0),      # joint-4
+    (-90.0, 90.0),     # joint-5
+]
+
 
 class RobotController:
     """
@@ -55,7 +65,7 @@ class RobotController:
         self._mc = None
         if not self.dry_run:
             from pymycobot.mycobot import MyCobot
-            self._mc = MyCobot(port, baud)
+            self._mc = MyCobot(port, baud) # type: ignore
             time.sleep (0.5)  # wait for connection
             try:
                 self._mc.power_on()
@@ -90,10 +100,10 @@ class RobotController:
         self._q.put(("pose", POSES.get(name)))
         print(f"[Robot] Enqueued pose: {name}")
 
-    def enqueue_angles(self, angles: List[float]):
-        """Queue an absolute joint move."""
-        self._q.put(("angles", angles))
-        print(f"[Robot] Enqueued angles: {angles}")
+    def enqueue_angles(self, angles: List[float], speed: Optional[int] = None):
+        """Queue an absolute joint move. Optional speed overrides default SPEED for this move."""
+        self._q.put(("angles", (angles, speed)))
+        print(f"[Robot] Enqueued angles: {angles} speed={speed or SPEED}")
 
     def emergency_stop(self):
         """Immediate stop + clear queues + disable follow."""
@@ -130,64 +140,88 @@ class RobotController:
                     if payload is None:
                         print("[Robot][WARN] Pose not found")
                     else:
-                        self._send_angles(payload)
+                        self._send_angles(payload, None)
                 elif kind == "angles":
-                    self._send_angles(payload or [])
+                    angs, sp = payload if isinstance(payload, tuple) else (payload, None)
+                    self._send_angles(angs or [], sp)
             except Exception as e:
                 print(f"[Robot][ERR] Move failed: {e}")
             finally:
                 self._q.task_done()
 
     def _follow_loop(self):
-        # (inside self._follow_loop)
-                period = 1.0 / FOLLOW_RATE_HZ
-                err_filt = 0.0
-                while not self._stop_evt.is_set():
-                    time.sleep(period)
-                    with self._follow_lock:
-                        enabled = self._follow_enabled
-                        err = self._follow_err_x
-                    if not enabled:
-                        continue
-                    # Smooth the error
-                    err_filt = (1.0 - ERR_SMOOTH_ALPHA) * err_filt + ERR_SMOOTH_ALPHA * err
+        period = 1.0 / FOLLOW_RATE_HZ
+        err_filt = 0.0
+        while not self._stop_evt.is_set():
+            time.sleep(period)
+            with self._follow_lock:
+                enabled = self._follow_enabled
+                err = self._follow_err_x
+            if not enabled:
+                continue
+            # Smooth the error
+            err_filt = (1.0 - ERR_SMOOTH_ALPHA) * err_filt + ERR_SMOOTH_ALPHA * err
 
-                    # Deadband: ignore small errors near center
-                    if abs(err_filt) < FOLLOW_ERR_DEADBAND:
-                        continue
-                    
-                    # Proportional step
-                    delta = YAW_KP_DEG_PER_ERR * err_filt
-                    delta = max(-YAW_MAX_STEP_DEG, min(YAW_MAX_STEP_DEG, delta))
+            # Deadband: ignore small errors near center
+            if abs(err_filt) < FOLLOW_ERR_DEADBAND:
+                continue
+            
+            # Proportional step
+            delta = YAW_KP_DEG_PER_ERR * err_filt
+            delta = max(-YAW_MAX_STEP_DEG, min(YAW_MAX_STEP_DEG, delta))
 
-                    # Skip tiny steps (avoid jitter)
-                    if abs(delta) < MIN_EFFECTIVE_STEP_DEG:
-                        continue
-                    
-                    if self.dry_run or not self._mc:
-                        print(f"[Robot][FOLLOW DRY] err={err:+.2f} filt={err_filt:+.2f} -> Δyaw={delta:+.2f}°")
-                        continue
-                    
-                    try:
-                        joints = self._mc.get_angles()
-                        if not joints or len(joints) != 6:
-                            print("[Robot][WARN] get_angles() failed")
-                            continue
-                        j1 = joints[0] + delta
-                        j1 = max(YAW_LIMITS_DEG[0], min(YAW_LIMITS_DEG[1], j1))
-                        #new_angles = [j1, joints[1], joints[2], joints[3], joints[4], joints[5]]
-                        new_angles = [j1, joints[1], joints[2], 75, 90, joints[5]]
-                        self._mc.send_angles(new_angles, SPEED)
-                    except Exception as e:
-                        print(f"[Robot][WARN] Follow step failed: {e}")
+            # Skip tiny steps (avoid jitter)
+            if abs(delta) < MIN_EFFECTIVE_STEP_DEG:
+                continue
+            
+            if self.dry_run or not self._mc:
+                print(f"[Robot][FOLLOW DRY] err={err:+.2f} filt={err_filt:+.2f} -> Δyaw={delta:+.2f}°")
+                continue
+            
+            try:
+                joints = self._mc.get_angles()
+                if not joints or len(joints) != 6:
+                    print("[Robot][WARN] get_angles() failed")
+                    continue
+                j1 = joints[0] + delta
+                j1 = max(YAW_LIMITS_DEG[0], min(YAW_LIMITS_DEG[1], j1))
+                #new_angles = [j1, joints[1], joints[2], joints[3], joints[4], joints[5]]
+                new_angles = [j1, joints[1], joints[2], 75, 90, joints[5]]
+                self._mc.send_angles(new_angles, SPEED)
+            except Exception as e:
+                print(f"[Robot][WARN] Follow step failed: {e}")
 
 
-    def _send_angles(self, angles: List[float]):
+    def _send_angles(self, angles: List[float], speed: Optional[int] = None):
+        """Send angles to hardware after basic validation/clamping. speed overrides default SPEED if provided."""
         if len(angles) != 6:
             print(f"[Robot][WARN] Expected 6 joints, got {len(angles)}")
             return
+
+        # Clamp angles to safe joint limits
+        clamped = []
+        for i, a in enumerate(angles):
+            if i < len(JOINT_LIMITS_DEG):
+                lo, hi = JOINT_LIMITS_DEG[i]
+            else:
+                lo, hi = (-180.0, 180.0)
+            a_clamped = max(lo, min(hi, float(a)))
+            if a_clamped != a:
+                print(f"[Robot][WARN] Joint {i} angle {a} out of limits, clamped to {a_clamped}")
+            clamped.append(a_clamped)
+
+        send_speed = speed if (speed is not None) else SPEED
         if self.dry_run or not self._mc:
-            print(f"[Robot][DRY] send_angles({angles}, speed={SPEED})")
+            print(f"[Robot][DRY] send_angles({clamped}, speed={send_speed})")
             time.sleep(0.1)
             return
-        self._mc.send_angles(angles, SPEED)
+        try:
+            # ensure servos are focused/powered before motion
+            try:
+                self._mc.power_on()
+                time.sleep(0.05)
+            except Exception:
+                pass
+            self._mc.send_angles(clamped, send_speed)
+        except Exception as e:
+            print(f"[Robot][ERR] _send_angles failed: {e}")

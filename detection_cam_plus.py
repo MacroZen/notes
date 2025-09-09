@@ -284,11 +284,12 @@ def main() -> int:
                 try:
                     mc = rc._mc
                     if mc:
+                        # disable follow while doing a manual jog to avoid competing commands
+                        rc.set_follow_enabled(False)
                         j = mc.get_angles()
                         if isinstance(j, list) and len(j) == 6:
                             j[0] +=10
-                            mc.send_angles(j, 20)
-                            mc.focus_all_servos()
+                            rc.enqueue_angles(j)
                             print("[TEST] J1 += 10° (should pan RIGHT in view)")
                 except Exception as e:
                     print("[TEST] jog failed:", e)
@@ -297,11 +298,12 @@ def main() -> int:
                 try:
                     mc = rc._mc
                     if mc:
-                        mc.focus_all_servos()
+                        # disable follow while doing a manual jog to avoid competing commands
+                        rc.set_follow_enabled(False)
                         j = mc.get_angles()
                         if isinstance(j, list) and len(j) == 6:
                             j[0] -=10
-                            mc.send_angles(j, 20)
+                            rc.enqueue_angles(j)
                             print("[TEST] J1 -= 10° (should pan LEFT in view)")
                 except Exception as e:
                     print("[TEST] jog failed:", e)
@@ -310,7 +312,8 @@ def main() -> int:
                 try:
                     mc = rc._mc
                     if mc:
-                        mc.send_angles([100,0,0,70,90,0],5)  #point cam
+                        rc.set_follow_enabled(False)
+                        rc.enqueue_angles([100,0,0,70,90,0], 20)  #point cam
                 except Exception as e:
                     print("[WARN] error", e)
             
@@ -322,16 +325,24 @@ def main() -> int:
                         if isinstance(j, list) and len(j) == 6:
                             j_new = j[:] # copy
                             #keep j1 as is
-                            # esure the rest are (0,0,0,70,90,0)
+                            # ensure the rest are (0,0,0,70,90,0)
                             MIN_POS = 1.0 #OPTIONAL DEGREES THRESHOLD
                             if j_new[1] <= 0.0:
                                 j_new[1] = MIN_POS
                             if j_new[2] <= 0.0:
                                 j_new[2] = MIN_POS
-                            j_new[3] <= 70.0
-                            j_new[4] <= 90.0
+                            # assign the desired pose for remaining joints
+                            j_new[3] = 70.0
+                            j_new[4] = 90.0
                             j_new[5] = 0.0
-                            mc.send_angles(j_new, 20)  # move slowly
+                            # disable follow and enqueue the move so it doesn't get immediately overridden
+                            rc.set_follow_enabled(False)
+                            try:
+                                if not rc.dry_run and rc._mc:
+                                    rc._mc.focus_all_servos()
+                            except Exception:
+                                pass
+                            rc.enqueue_angles(j_new, 40)  # use higher speed to overcome gravity
                             print("STAND UP")
 
                 except Exception as e:

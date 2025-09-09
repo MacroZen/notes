@@ -117,7 +117,7 @@ def robot_move_to_safe_pose() -> None:
     """
     try:
         from pymycobot.mycobot import MyCobot
-        mc = MyCobot('/dev/ttyAMA0', 115200)  # adapt if using USB or different port
+        mc = MyCobot('/dev/ttyAMA0', 115200)  # type: ignore # adapt if using USB or different port
         #safe_angles = [0, 0, 0, 0, 0, 0]      # <-- replace with your tested safe angles
         #mc.send_angles(safe_angles, 20)       # move slowly
     except Exception as e:
@@ -156,7 +156,7 @@ class PresenceTrigger:
         # Is a qualifying person detected in this frame?
         person_now = any(
             (str(d.get('label')) in PERSON_CLASS_NAMES) and
-            (float(d.get('conf', 0.0)) >= CONF_THRESH) and
+            (float(d.get('conf', 0.0)) >= CONF_THRESH) and # type: ignore
             in_roi(tuple(d.get('bbox')), ROI)  # type: ignore[arg-type]
             for d in detections
             if 'bbox' in d
