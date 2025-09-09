@@ -44,6 +44,8 @@ LOCK_POLICY = "largest"   # 'largest' | 'center' | 'nearest_roi' (ROI from prese
 LOST_REACQUIRE = False    # auto-reacquire when lost (largest person)
 TRACKER_TYPE = "CSRT"     # "CSRT" (robust) or "KCF" (lighter)
 
+JOG_STEP = 4.0  # degrees per key press for manual jogs
+
 # helper: create tracker
 def create_tracker():
     if TRACKER_TYPE.upper() == "KCF":
@@ -279,7 +281,7 @@ def main() -> int:
                     print("[LOCK] Target locked. Press 'g' to follow, 'u' to unlock.")
                 else:
                     print("[LOCK] No person to lock.")
-            # J/L: manual yaw jog test (+/- 10 degrees on joint-1)
+            # J/L: manual yaw jog test (+/- JOG_STEP degrees on joint-1)
             if key == ord('l'):  # expect yaw to turn right in the camera view
                 try:
                     mc = rc._mc
@@ -288,9 +290,11 @@ def main() -> int:
                         rc.set_follow_enabled(False)
                         j = mc.get_angles()
                         if isinstance(j, list) and len(j) == 6:
-                            j[0] +=10
-                            rc.enqueue_angles(j)
-                            print("[TEST] J1 += 10° (should pan RIGHT in view)")
+                            delta = float(JOG_STEP)
+                            # keep joint-1 as-is, but set joints (2..5) to fixed camera pose
+                            new_angles = [j[0] + delta, j[1], 0.0, 70.0, 90.0, 0.0]
+                            rc.enqueue_angles(new_angles)
+                            print(f"[TEST] J1 += {delta}° -> {new_angles}")
                 except Exception as e:
                     print("[TEST] jog failed:", e)
 
@@ -302,9 +306,10 @@ def main() -> int:
                         rc.set_follow_enabled(False)
                         j = mc.get_angles()
                         if isinstance(j, list) and len(j) == 6:
-                            j[0] -=10
-                            rc.enqueue_angles(j)
-                            print("[TEST] J1 -= 10° (should pan LEFT in view)")
+                            delta = -float(JOG_STEP)
+                            new_angles = [j[0] + delta, 0.0, 0.0, 70.0, 90.0, 0.0]
+                            rc.enqueue_angles(new_angles)
+                            print(f"[TEST] J1 += {delta}° -> {new_angles}")
                 except Exception as e:
                     print("[TEST] jog failed:", e)
 

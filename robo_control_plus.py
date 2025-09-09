@@ -20,8 +20,12 @@ POSES: Dict[str, List[float]] = {
 #    "RIGHT": [121, 0, 0, 80, 100, 50],
 }
 
-SPEED = 5         # keep slow for safety (0-100)
+SPEED = 50         # keep slow for safety (0-100)
 DRY_RUN = False     # <-- START HERE TRUE; set False when you're ready
+
+# Ensure robot moves to an initial camera pose on start to avoid sag after manual moves
+INITIAL_POSE = [0.0, 0.0, 0.0, 70.0, 90.0, 0.0]
+INITIAL_SPEED = 30
 
 # =========================
 # FOLLOW CONTROLLER CONFIG
@@ -85,6 +89,23 @@ class RobotController:
     def start(self):
         self._worker.start()
         self._follow_thread.start()
+        # Power/focus servos and move to a known initial pose to ensure holding torque
+        try:
+            if self._mc and not self.dry_run:
+                try:
+                    self._mc.power_on()
+                except Exception:
+                    pass
+                try:
+                    self._mc.focus_all_servos()
+                except Exception:
+                    pass
+        except Exception as e:
+            print(f"[Robot][WARN] startup focus/power failed: {e}")
+
+        # Disable follow while moving to initial pose and enqueue the pose
+        self.set_follow_enabled(False)
+        self.enqueue_angles(INITIAL_POSE, INITIAL_SPEED)
 
     def stop(self):
         self._stop_evt.set()
