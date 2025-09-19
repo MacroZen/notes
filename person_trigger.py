@@ -28,7 +28,7 @@ from typing import Dict, List, Tuple, Optional
 # Acceptable label names for "person" from your model:
 PERSON_CLASS_NAMES = {"person", "Person", "human"}
 
-CONF_THRESH: float = 0.5      # minimum confidence to consider the detection valid
+CONF_THRESH: float = 0.7      # minimum confidence to consider the detection valid
 ENTER_PERSISTENCE: int = 3    # frames with person required to confirm ENTER
 EXIT_PERSISTENCE: int = 5     # frames without person required to confirm EXIT
 COOLDOWN_S: float = 10.0      # min seconds between ENTER events (prevents re-trigger spam)

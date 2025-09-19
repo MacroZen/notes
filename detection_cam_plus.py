@@ -1,18 +1,18 @@
 # detect_cam.py
 from __future__ import annotations
 import time, sys
-from typing import List, Optional, Tuple
+from typing import List, Optional, Tuple, Dict
 import cv2
 
 from person_trigger import PresenceTrigger, Detection
 import person_trigger as pt_config
-from robo_control_plus import RobotController
+from robo_control_plus import RobotController, INITIAL_POSE
 
 # =========================
 # TOGGLES
 # =========================
 FAST_MODE = True
-USE_TRACKING_IDS = False   # keep False (we're doing single-target CSRT lock)
+USE_TRACKING_IDS = True   # keep False (we're doing single-target CSRT lock)
 DRAW = True
 
 # =========================
@@ -40,31 +40,124 @@ if FAST_MODE:
 # =========================
 # LOCK/Follow settings
 # =========================
-LOCK_POLICY = "largest"   # 'largest' | 'center' | 'nearest_roi' (ROI from presence_trigger)
+LOCK_POLICY = "nearest_roi"   # 'largest' | 'center' | 'nearest_roi' (ROI from presence_trigger)
 LOST_REACQUIRE = False    # auto-reacquire when lost (largest person)
 TRACKER_TYPE = "CSRT"     # "CSRT" (robust) or "KCF" (lighter)
 
 JOG_STEP = 4.0  # degrees per key press for manual jogs
 
+# Detection/tracker sanity filters
+MIN_BOX_AREA_RATIO = 0.2   # ignore boxes smaller than this fraction of frame area
+INIT_CONF = 0.35            # minimum confidence required to initialize tracker
+MIN_ASPECT = 0.15           # min width/height
+MAX_ASPECT = 1.8            # max width/height
+IOU_REVALIDATE_EVERY = 5    # frames between revalidation checks (when detections are available)
+IOU_MIN = 0.15              # minimum IoU between detector and tracker to consider still valid
+HIST_SIM_THRESH = 0.4       # histogram similarity threshold (cv2.HISTCMP_CORREL -> [-1..1], expect >0.4)
+
+# Switch/hysteresis tuning
+SWITCH_CONF_MARGIN = 0.4   # candidate must exceed current_conf by this margin to be considered
+SWITCH_PERSISTENCE = 3      # consecutive frames required to accept a switch
+SWITCH_COOLDOWN_S = 2.0     # seconds after a switch during which further switches are suppressed
+IOU_SWITCH_LOW = 0.25       # if candidate IoU < this and conf margin met, candidate may be considered
+IOU_SWITCH_HIGH = 0.55      # if candidate IoU > this, consider it same target
+
 # helper: create tracker
 def create_tracker():
     if TRACKER_TYPE.upper() == "KCF":
-        # KCF fallback if contrib install is heavy
-        return cv2.legacy.TrackerKCF_create()
+        # Try legacy namespace first, fallback to main cv2 namespace
+        if hasattr(cv2, 'legacy') and hasattr(cv2.legacy, 'TrackerKCF_create'):
+            return cv2.legacy.TrackerKCF_create()
+        elif hasattr(cv2, 'TrackerKCF_create'):
+            return cv2.TrackerKCF_create()
+        else:
+            raise RuntimeError("KCF tracker not available in your OpenCV installation.")
     # CSRT (requires opencv-contrib-python)
-    return cv2.legacy.TrackerCSRT_create()
+    if hasattr(cv2, 'legacy') and hasattr(cv2.legacy, 'TrackerCSRT_create'):
+        return cv2.legacy.TrackerCSRT_create()
+    elif hasattr(cv2, 'TrackerCSRT_create'):
+        return cv2.TrackerCSRT_create()
+    else:
+        raise RuntimeError("CSRT tracker not available in your OpenCV installation.")
+
+def bbox_area(b):
+    x1,y1,x2,y2 = b
+    return max(0.0, float(x2 - x1) * float(y2 - y1))
+
+
+def bbox_iou(a, b):
+    # a and b are (x1,y1,x2,y2)
+    ax1,ay1,ax2,ay2 = a
+    bx1,by1,bx2,by2 = b
+    ix1 = max(ax1, bx1)
+    iy1 = max(ay1, by1)
+    ix2 = min(ax2, bx2)
+    iy2 = min(ay2, by2)
+    iw = max(0.0, ix2 - ix1)
+    ih = max(0.0, iy2 - iy1)
+    inter = iw * ih
+    union = bbox_area(a) + bbox_area(b) - inter
+    return (inter / union) if union > 0 else 0.0
+
+
+def bbox_aspect(b):
+    x1,y1,x2,y2 = b
+    w = max(1.0, x2 - x1)
+    h = max(1.0, y2 - y1)
+    return float(w) / float(h)
+
+
+def make_hist(img, bbox):
+    # compute a small HSV histogram for the bbox region
+    x1,y1,x2,y2 = [int(v) for v in bbox]
+    h,w = img.shape[:2]
+    x1 = max(0, min(x1, w-1)); x2 = max(0, min(x2, w-1))
+    y1 = max(0, min(y1, h-1)); y2 = max(0, min(y2, h-1))
+    if x2 <= x1 or y2 <= y1:
+        return None
+    patch = img[y1:y2, x1:x2]
+    if patch.size == 0:
+        return None
+    hsv = cv2.cvtColor(patch, cv2.COLOR_BGR2HSV)
+    hist = cv2.calcHist([hsv], [0,1], None, [30,32], [0,180,0,256])
+    cv2.normalize(hist, hist)
+    return hist
 
 def choose_target(dets: List[Detection], frame_size: Tuple[int,int]) -> Optional[Detection]:
-    """Select one 'person' detection to lock onto based on LOCK_POLICY."""
+    """Select one 'person' detection to lock onto based on LOCK_POLICY.
+    Applies sanity filters (confidence, area, aspect) to avoid bright-spot false positives.
+    """
     persons = [d for d in dets if str(d['label']).lower() == 'person']
     if not persons:
         return None
     W, H = frame_size
 
+    # filter by basic criteria
+    def valid(d):
+        try:
+            conf = float(d.get('conf', 0.0))
+            if conf < INIT_CONF:
+                return False
+            x1,y1,x2,y2 = d['bbox']
+            area = bbox_area((x1,y1,x2,y2))
+            if area < (MIN_BOX_AREA_RATIO * float(W) * float(H)):
+                return False
+            asp = bbox_aspect((x1,y1,x2,y2))
+            if asp < MIN_ASPECT or asp > MAX_ASPECT:
+                return False
+            return True
+        except Exception:
+            return False
+
+    filtered = [p for p in persons if valid(p)]
+    if not filtered:
+        # no high-quality person detections
+        return None
+
     if LOCK_POLICY == "largest":
-        def area(d):
+        def area_fn(d):
             x1,y1,x2,y2 = d['bbox']; return (x2-x1)*(y2-y1)
-        return max(persons, key=area)
+        return max(filtered, key=area_fn)
 
     if LOCK_POLICY == "center":
         cx, cy = W/2.0, H/2.0
@@ -72,7 +165,7 @@ def choose_target(dets: List[Detection], frame_size: Tuple[int,int]) -> Optional
             x1,y1,x2,y2 = d['bbox']
             mx, my = 0.5*(x1+x2), 0.5*(y1+y2)
             return (mx-cx)**2 + (my-cy)**2
-        return min(persons, key=dist2)
+        return min(filtered, key=dist2)
 
     if LOCK_POLICY == "nearest_roi" and pt_config.ROI is not None:
         rx1, ry1, rx2, ry2 = pt_config.ROI
@@ -81,9 +174,9 @@ def choose_target(dets: List[Detection], frame_size: Tuple[int,int]) -> Optional
             x1,y1,x2,y2 = d['bbox']
             mx, my = 0.5*(x1+x2), 0.5*(y1+y2)
             return (mx-rcx)**2 + (my-rcy)**2
-        return min(persons, key=dist2_roi)
+        return min(filtered, key=dist2_roi)
 
-    return persons[0]
+    return filtered[0]
 
 def parse_results_to_detections(results, names) -> List[Detection]:
     out: List[Detection] = []
@@ -111,6 +204,29 @@ def norm_error_x(bbox, W):
     x1,y1,x2,y2 = bbox
     cx = 0.5*(x1+x2)
     return float((cx - (W/2.0)) / (W/2.0))
+
+def set_lock_led(rc, locked: bool):
+    """Set the robot arm LED: red when locked, green when unlocked.
+    Guarded by RobotController.dry_run and presence of the low-level _mc object.
+    """
+    try:
+        if rc is None:
+            return
+        # RobotController may expose a dry_run flag to avoid hardware calls
+        if getattr(rc, 'dry_run', False):
+            return
+        mc = getattr(rc, '_mc', None)
+        if mc is None:
+            return
+        if locked:
+            # red
+            mc.set_color(255, 0, 0)
+        else:
+            # green
+            mc.set_color(0, 255, 0)
+    except Exception:
+        # best-effort only; don't raise from LED failures
+        pass
 
 def main() -> int:
     # --- Robot ---
@@ -147,6 +263,18 @@ def main() -> int:
     locked = False
     tracker = None
     lock_bbox_xywh: Optional[Tuple[int,int,int,int]] = None
+    track_hist = None
+    track_revalidate_counter = 0
+    last_detector_detections: List[Detection] = []
+    next_det_id = 1
+    # small registry for detection IDs: {id: {'bbox':(x1,y1,x2,y2),'last_seen':frame_idx,'conf':float}}
+    det_registry: Dict[int, Dict] = {}
+    REGISTRY_MAX_AGE_FRAMES = 6
+     # sticky-switch state
+    _current_locked_det: Optional[Detection] = None
+    _current_locked_conf: float = 0.0
+    _switch_counter: int = 0
+    _last_switch_ts: float = 0.0
 
     fps_avg, alpha = 0.0, 0.05
     frame_idx = 0
@@ -176,6 +304,41 @@ def main() -> int:
                     verbose=False
                 )
                 detections = parse_results_to_detections(res, names)
+                # registry-based matching: match detections to det_registry by IoU (greedy)
+                assigned: List[Detection] = []
+                used_ids = set()
+                for d in detections:
+                    best_id = None
+                    best_iou = 0.0
+                    for tid, entry in list(det_registry.items()):
+                        try:
+                            iou = bbox_iou(d['bbox'], entry['bbox'])
+                        except Exception:
+                            iou = 0.0
+                        if iou > best_iou:
+                            best_iou = iou
+                            best_id = tid
+                    # adopt match if IoU high enough
+                    if best_id is not None and best_iou >= 0.5 and best_id not in used_ids:
+                        d['track_id'] = best_id
+                        # update registry entry
+                        det_registry[best_id]['bbox'] = d['bbox']
+                        det_registry[best_id]['last_seen'] = frame_idx
+                        det_registry[best_id]['conf'] = float(d.get('conf', 0.0))
+                        used_ids.add(best_id)
+                    else:
+                        # create new id
+                        tid = next_det_id
+                        next_det_id += 1
+                        d['track_id'] = tid
+                        det_registry[tid] = {'bbox': d['bbox'], 'last_seen': frame_idx, 'conf': float(d.get('conf', 0.0))}
+                        used_ids.add(tid)
+                    assigned.append(d)
+                last_detector_detections = assigned
+                # cleanup stale registry entries
+                stale = [tid for tid, e in det_registry.items() if (frame_idx - int(e.get('last_seen', frame_idx))) > REGISTRY_MAX_AGE_FRAMES]
+                for tid in stale:
+                    det_registry.pop(tid, None)
                 events = presence.update(detections)
 
             # ---- update single-object tracker if locked ----
@@ -187,13 +350,137 @@ def main() -> int:
                     # robot follow: compute normalized horizontal error
                     err_x = norm_error_x((x, y, x+w, y+h), W)
                     rc.update_follow_error(err_x)
+
+                    # revalidation: every N frames when detector results exist, ensure tracker still matches detections
+                    track_revalidate_counter += 1
+                    if do_infer and (track_revalidate_counter % IOU_REVALIDATE_EVERY == 0):
+                        # find best detector bbox IoU with tracker
+                        tbbox = (x, y, x+w, y+h)
+                        best = None
+                        best_iou = 0.0
+                        for d in last_detector_detections:
+                            if str(d.get('label')).lower() != 'person':
+                                continue
+                            iou = bbox_iou(tbbox, d['bbox'])
+                            if iou > best_iou:
+                                best_iou = iou
+                                best = d
+                        if best is None or best_iou < IOU_MIN:
+                            print(f"[TRACK] Revalidation failed (best_iou={best_iou:.2f}) — stopping track")
+                            locked = False
+                            rc.set_follow_enabled(False)
+                            tracker = None
+                            lock_bbox_xywh = None
+                            track_hist = None
+                            _current_locked_det = None
+                            _current_locked_conf = 0.0
+                            _switch_counter = 0
+                            track_revalidate_counter = 0
+                            # update LED to indicate unlocked
+                            set_lock_led(rc, False)
+                            continue
+                        # also check histogram similarity if available
+                        if track_hist is not None:
+                            cur_hist = make_hist(frame, best['bbox'])
+                            if cur_hist is None:
+                                print("[TRACK] couldn't compute detector hist — stopping")
+                                locked = False
+                                rc.set_follow_enabled(False)
+                                tracker = None
+                                lock_bbox_xywh = None
+                                track_hist = None
+                                _current_locked_det = None
+                                _current_locked_conf = 0.0
+                                _switch_counter = 0
+                                track_revalidate_counter = 0
+                                # update LED to indicate unlocked
+                                set_lock_led(rc, False)
+                                continue
+                            sim = cv2.compareHist(track_hist, cur_hist, cv2.HISTCMP_CORREL)
+                            if sim < HIST_SIM_THRESH:
+                                print(f"[TRACK] Histogram similarity low ({sim:.2f}) — stopping")
+                                locked = False
+                                rc.set_follow_enabled(False)
+                                tracker = None
+                                lock_bbox_xywh = None
+                                track_hist = None
+                                _current_locked_det = None
+                                _current_locked_conf = 0.0
+                                _switch_counter = 0
+                                track_revalidate_counter = 0
+                                # update LED to indicate unlocked
+                                set_lock_led(rc, False)
+                                continue
+                        # --- switching logic: consider strong detector candidates to replace current lock ---
+                        try:
+                            # build candidate list with basic quality checks
+                            candidates = []
+                            for d in last_detector_detections:
+                                if str(d.get('label')).lower() != 'person':
+                                    continue
+                                conf = float(d.get('conf', 0.0))
+                                x1,y1,x2,y2 = d['bbox']
+                                area = bbox_area((x1,y1,x2,y2))
+                                if conf < INIT_CONF:
+                                    continue
+                                if area < (MIN_BOX_AREA_RATIO * float(W) * float(H)):
+                                    continue
+                                asp = bbox_aspect(d['bbox'])
+                                if asp < MIN_ASPECT or asp > MAX_ASPECT:
+                                    continue
+                                candidates.append(d)
+                            if candidates:
+                                best_cand = max(candidates, key=lambda z: float(z.get('conf', 0.0)))
+                                cand_iou = bbox_iou(tbbox, best_cand['bbox'])
+                                cand_conf = float(best_cand.get('conf', 0.0))
+                               
+                                # if we have tracking ids enabled and the candidate matches the current id, treat as same
+
+                            if USE_TRACKING_IDS and _current_locked_det is not None and best_cand.get('track_id') == _current_locked_det.get('track_id'):
+                                _current_locked_det = best_cand
+                                _current_locked_conf = max(_current_locked_conf, cand_conf)
+                                _switch_counter = 0
+                            else:
+                                 # if high IoU -> same target; refresh stored confidence
+                                    if cand_iou > IOU_SWITCH_HIGH:
+                                        _current_locked_det = best_cand
+                                        _current_locked_conf = max(_current_locked_conf, cand_conf)
+                                        _switch_counter = 0
+                                    else:
+                                        # candidate appears better than current by margin and is not overlapping
+                                        if cand_conf > (_current_locked_conf + SWITCH_CONF_MARGIN):
+                                            _switch_counter += 1
+                                            if _switch_counter >= SWITCH_PERSISTENCE and (time.time() - _last_switch_ts) >= SWITCH_COOLDOWN_S:
+                                                # perform switch
+                                                print(f"[TRACK] Switching lock to new candidate conf={cand_conf:.2f} iou={cand_iou:.2f}")
+                                                x1,y1,x2,y2 = best_cand['bbox']
+                                                box_new = (int(x1), int(y1), int(x2-x1), int(y2-y1))
+                                                tracker = create_tracker()
+                                                tracker.init(frame, box_new)
+                                                locked = True
+                                                lock_bbox_xywh = box_new
+                                                _current_locked_det = best_cand
+                                                _current_locked_conf = cand_conf
+                                                _last_switch_ts = time.time()
+                                                _switch_counter = 0
+                                                track_hist = make_hist(frame, best_cand['bbox'])
+                                                # switched lock -> LED red
+                                                set_lock_led(rc, True)
+                                        else:
+                                            _switch_counter = 0
+                        except Exception:
+                            pass
                 else:
                     # lost tracking
                     locked = False
                     rc.set_follow_enabled(False)
                     lock_bbox_xywh = None
                     tracker = None
+                    track_hist = None
+                    track_revalidate_counter = 0
                     print("[LOCK] Lost target. Follow disabled.")
+                    # indicate unlocked LED
+                    set_lock_led(rc, False)
                     # optional auto-reacquire
                     if LOST_REACQUIRE and do_infer:
                         cand = choose_target(detections, (W, H))
@@ -202,8 +489,12 @@ def main() -> int:
                             box = (int(x1), int(y1), int(x2-x1), int(y2-y1))
                             tracker = create_tracker()
                             tracker.init(frame, box)
+                            # compute initial histogram signature
+                            track_hist = make_hist(frame, cand['bbox'])
                             locked = True
                             print("[LOCK] Reacquired target.")
+                            # indicate locked LED
+                            set_lock_led(rc, True)
 
             # ---- drawing ----
             if DRAW:
@@ -258,18 +549,22 @@ def main() -> int:
                 locked = False
                 tracker = None
                 lock_bbox_xywh = None
+                set_lock_led(rc, False)
             if key == ord('u'):         # unlock
                 locked = False
                 rc.set_follow_enabled(False)
                 tracker = None
                 lock_bbox_xywh = None
                 print("[LOCK] Unlocked.")
+                set_lock_led(rc, False)
             if key == ord('g'):         # follow toggle
-                # Only enables follow if locked
-                enable = not rc._follow_enabled
-                rc.set_follow_enabled(enable and locked)
+                # Toggle follow only when locked; otherwise ensure disabled
+                if locked:
+                    rc.set_follow_enabled(not rc._follow_enabled)
+                else:
+                    rc.set_follow_enabled(False)
             if key == ord('t'):         # lock on current best person
-                # Need a person detection from the most recent YOLO run
+                 # Need a person detection from the most recent YOLO run
                 cand = choose_target(detections, (W, H)) if do_infer else None
                 if cand:
                     x1,y1,x2,y2 = cand['bbox']
@@ -278,10 +573,19 @@ def main() -> int:
                     tracker.init(frame, box)
                     locked = True
                     lock_bbox_xywh = box
+                    # initialize sticky-switch state
+                    _current_locked_det = cand
+                    _current_locked_conf = float(cand.get('conf', 0.0))
+                    track_revalidate_counter = 0
+                    _last_switch_ts = time.time()
+                    _switch_counter = 0
+                    track_hist = make_hist(frame, cand['bbox'])
                     print("[LOCK] Target locked. Press 'g' to follow, 'u' to unlock.")
+                    # indicate locked LED
+                    set_lock_led(rc, True)
                 else:
                     print("[LOCK] No person to lock.")
-            # J/L: manual yaw jog test (+/- JOG_STEP degrees on joint-1)
+            # J/L: manual yaw jog test (+/- JOG_STEP degrees on joint-0)
             if key == ord('l'):  # expect yaw to turn right in the camera view
                 try:
                     mc = rc._mc
@@ -291,8 +595,8 @@ def main() -> int:
                         j = mc.get_angles()
                         if isinstance(j, list) and len(j) == 6:
                             delta = float(JOG_STEP)
-                            # keep joint-1 as-is, but set joints (2..5) to fixed camera pose
-                            new_angles = [j[0] + delta, j[1], 0.0, 70.0, 90.0, 0.0]
+                           # apply delta to joint-0 and keep the rest at INITIAL_POSE
+                            new_angles = [j[0] + delta] + INITIAL_POSE[1:]
                             rc.enqueue_angles(new_angles)
                             print(f"[TEST] J1 += {delta}° -> {new_angles}")
                 except Exception as e:
@@ -307,7 +611,7 @@ def main() -> int:
                         j = mc.get_angles()
                         if isinstance(j, list) and len(j) == 6:
                             delta = -float(JOG_STEP)
-                            new_angles = [j[0] + delta, 0.0, 0.0, 70.0, 90.0, 0.0]
+                            new_angles = [j[0] + delta] + INITIAL_POSE[1:]
                             rc.enqueue_angles(new_angles)
                             print(f"[TEST] J1 += {delta}° -> {new_angles}")
                 except Exception as e:

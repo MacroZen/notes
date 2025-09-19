@@ -24,16 +24,18 @@ SPEED = 50         # keep slow for safety (0-100)
 DRY_RUN = False     # <-- START HERE TRUE; set False when you're ready
 
 # Ensure robot moves to an initial camera pose on start to avoid sag after manual moves
-INITIAL_POSE = [0.0, 0.0, 0.0, 70.0, 90.0, 0.0]
+INITIAL_POSE = [0,0,0,0,-100,0]
 INITIAL_SPEED = 30
+#0,90,-90,0,-90,0]
+
 
 # =========================
 # FOLLOW CONTROLLER CONFIG
 # =========================
-FOLLOW_RATE_HZ = 3.0          # how often we send corrections
+FOLLOW_RATE_HZ = 8.0          # how often we send corrections
 YAW_KP_DEG_PER_ERR = 18.0     # deg of joint-1 per unit normalized error ([-1..1])
 YAW_MAX_STEP_DEG = 6.0        # max deg per control tick
-YAW_LIMITS_DEG = (-130.0, 130.0)  # safety clamp for joint-1 range
+YAW_LIMITS_DEG = (-160.0, 160.0)  # safety clamp for joint-1 range
 FOLLOW_ERR_DEADBAND = 0.10   # ignore small errors 10% of frame width
 ERR_SMOOTH_ALPHA = 0.3       # LOWPASS filter alpha for error smoothing
 MIN_EFFECTIVE_STEP_DEG = 1.0  # if step smaller than this, skip it
@@ -43,8 +45,8 @@ JOINT_LIMITS_DEG = [
     YAW_LIMITS_DEG,    # joint-0 (yaw)
     (-90.0, 90.0),     # joint-1
     (-90.0, 90.0),     # joint-2
-    (0.0, 180.0),      # joint-3
-    (0.0, 180.0),      # joint-4
+    (-90.0, 90.0),      # joint-3
+    (-90.0, 90.0),      # joint-4
     (-90.0, 90.0),     # joint-5
 ]
 
@@ -56,7 +58,10 @@ class RobotController:
     """
     def __init__(self, port: str = ROBOT_PORT, baud: int = ROBOT_BAUD, dry_run: bool = DRY_RUN):
         self.dry_run = dry_run
-        self._q: "queue.Queue[tuple[str, Optional[List[float]]]]" = queue.Queue()
+        # LED color state (R,G,B) - keep green by default (unlocked)
+        self._led_color = (0, 255, 0)
+        # use an untyped Queue to avoid fragile generic typing mismatches
+        self._q = queue.Queue()
         self._stop_evt = threading.Event()
         self._worker = threading.Thread(target=self._run_queue, daemon=True)
 
@@ -65,6 +70,9 @@ class RobotController:
         self._follow_err_x = 0.0     # latest normalized horizontal error [-1..1]
         self._follow_lock = threading.Lock()
         self._follow_thread = threading.Thread(target=self._follow_loop, daemon=True)
+
+        # last enqueued joint-0 angle (to avoid spamming the same command when HW hasn't updated yet)
+        self._last_enqueued_j0: Optional[float] = None
 
         self._mc = None
         if not self.dry_run:
@@ -106,6 +114,11 @@ class RobotController:
         # Disable follow while moving to initial pose and enqueue the pose
         self.set_follow_enabled(False)
         self.enqueue_angles(INITIAL_POSE, INITIAL_SPEED)
+        # apply initial LED color (best-effort)
+        try:
+            self.set_status_color(*self._led_color)
+        except Exception:
+            pass
 
     def stop(self):
         self._stop_evt.set()
@@ -125,6 +138,13 @@ class RobotController:
         """Queue an absolute joint move. Optional speed overrides default SPEED for this move."""
         self._q.put(("angles", (angles, speed)))
         print(f"[Robot] Enqueued angles: {angles} speed={speed or SPEED}")
+        # remember the last requested joint-0 so follow loop doesn't repeatedly enqueue the same target
+        try:
+            if isinstance(angles, (list, tuple)) and len(angles) >= 1:
+                with self._follow_lock:
+                    self._last_enqueued_j0 = float(angles[0])
+        except Exception:
+            pass
 
     def emergency_stop(self):
         """Immediate stop + clear queues + disable follow."""
@@ -187,8 +207,9 @@ class RobotController:
             if abs(err_filt) < FOLLOW_ERR_DEADBAND:
                 continue
             
-            # Proportional step
-            delta = YAW_KP_DEG_PER_ERR * err_filt
+            # Proportional step (note sign): positive err -> target is right of center
+            # we invert sign so positive error causes corrective pan toward the target
+            delta = -YAW_KP_DEG_PER_ERR * err_filt
             delta = max(-YAW_MAX_STEP_DEG, min(YAW_MAX_STEP_DEG, delta))
 
             # Skip tiny steps (avoid jitter)
@@ -204,45 +225,112 @@ class RobotController:
                 if not joints or len(joints) != 6:
                     print("[Robot][WARN] get_angles() failed")
                     continue
-                j1 = joints[0] + delta
-                j1 = max(YAW_LIMITS_DEG[0], min(YAW_LIMITS_DEG[1], j1))
-                #new_angles = [j1, joints[1], joints[2], joints[3], joints[4], joints[5]]
-                new_angles = [j1, joints[1], joints[2], 75, 90, joints[5]]
-                self._mc.send_angles(new_angles, SPEED)
+                old_j0 = float(joints[0])
+                new_j0 = old_j0 + delta
+                new_j0 = max(YAW_LIMITS_DEG[0], min(YAW_LIMITS_DEG[1], new_j0))
+                # build the command using INITIAL_POSE for joints 1..5 and updated joint-0
+                try:
+                    base = list(INITIAL_POSE)
+                except Exception:
+                    base = [0.0, 0.0, 0.0, 70.0, 90.0, 0.0]
+                new_angles = [new_j0, base[1], base[2], base[3], base[4], base[5]]
+                # concise debug to help tune control loop
+                print(f"[Robot][FOLLOW] err={err:+.2f} filt={err_filt:+.2f} Δ={delta:+.2f} -> j0 {old_j0:+.2f}->{new_j0:+.2f} enqueuing {new_angles}")
+                # avoid spamming the same j0 if we already enqueued it recently
+                do_enqueue = True
+                with self._follow_lock:
+                    last = self._last_enqueued_j0
+                    if last is not None and abs(last - new_j0) <= max(0.5, MIN_EFFECTIVE_STEP_DEG):
+                        do_enqueue = False
+                if not do_enqueue:
+                    print(f"[Robot][FOLLOW] Skipping enqueue: already requested j0={last:+.2f}")
+                    continue
+
+                # enqueue the new target using the same queue path (this keeps motion serialized)
+                try:
+                    self.enqueue_angles(new_angles, speed=20)
+                except Exception as e:
+                    print(f"[Robot][ERR] Failed to enqueue follow move: {e}")
             except Exception as e:
-                print(f"[Robot][WARN] Follow step failed: {e}")
+                # catch any unexpected errors in the follow loop's outer try
+                print(f"[Robot][ERR] Follow loop error: {e}")
+                continue
 
-
-    def _send_angles(self, angles: List[float], speed: Optional[int] = None):
-        """Send angles to hardware after basic validation/clamping. speed overrides default SPEED if provided."""
-        if len(angles) != 6:
-            print(f"[Robot][WARN] Expected 6 joints, got {len(angles)}")
-            return
-
-        # Clamp angles to safe joint limits
-        clamped = []
-        for i, a in enumerate(angles):
+    # helper: clamp angles to JOINT_LIMITS_DEG and ensure 6-element list
+    def _clamp_angles(self, angles: List[float]) -> List[float]:
+        out = []
+        base = list(INITIAL_POSE)
+        for i in range(6):
+            v = float(angles[i]) if i < len(angles) else float(base[i])
             if i < len(JOINT_LIMITS_DEG):
                 lo, hi = JOINT_LIMITS_DEG[i]
-            else:
-                lo, hi = (-180.0, 180.0)
-            a_clamped = max(lo, min(hi, float(a)))
-            if a_clamped != a:
-                print(f"[Robot][WARN] Joint {i} angle {a} out of limits, clamped to {a_clamped}")
-            clamped.append(a_clamped)
+                v = max(lo, min(hi, v))
+            out.append(v)
+        return out
 
-        send_speed = speed if (speed is not None) else SPEED
-        if self.dry_run or not self._mc:
-            print(f"[Robot][DRY] send_angles({clamped}, speed={send_speed})")
-            time.sleep(0.1)
+    def _send_angles(self, angles: List[float], speed: Optional[int] = None):
+        """Send a clamped 6-joint command to the robot. Ensures power/focus and handles DRY_RUN."""
+        if angles is None:
             return
         try:
-            # ensure servos are focused/powered before motion
+            angs = [float(x) for x in angles]
+        except Exception:
+            print(f"[Robot][ERR] invalid angles payload: {angles}")
+            return
+
+        # ensure 6 joints and clamp to limits
+        angs = self._clamp_angles(angs)
+
+        sp = int(speed) if speed is not None else SPEED
+
+        if self.dry_run or not self._mc:
+            print(f"[Robot][DRY] would send angles: {angs} speed={sp}")
+            return
+
+        # Ensure servos are powered and focused before commanding (best-effort)
+        try:
             try:
                 self._mc.power_on()
-                time.sleep(0.05)
             except Exception:
                 pass
-            self._mc.send_angles(clamped, send_speed)
+            try:
+                self._mc.focus_all_servos()
+            except Exception:
+                pass
+            # send to hardware
+            try:
+                # pymycobot.MyCobot.send_angles expects (angles, speed)
+                self._mc.send_angles(angs, sp)  # type: ignore
+                print(f"[Robot] Sent angles: {angs} speed={sp}")
+                # reapply stored LED color after motion (some firmwares reset it)
+                try:
+                    if hasattr(self._mc, 'set_color') and self._led_color is not None:
+                        r,g,b = self._led_color
+                        try:
+                            self._mc.set_color(int(r), int(g), int(b))
+                        except Exception:
+                            pass
+                except Exception:
+                    pass
+            except Exception as e:
+                print(f"[Robot][ERR] send_angles failed: {e}")
         except Exception as e:
-            print(f"[Robot][ERR] _send_angles failed: {e}")
+            print(f"[Robot][ERR] _send_angles unexpected error: {e}")
+    
+    def set_status_color(self, r: int, g: int, b: int):
+        """Store desired LED color and apply it to the robot (best-effort)."""
+        try:
+            self._led_color = (int(r), int(g), int(b))
+        except Exception:
+            return
+        if self.dry_run or not self._mc:
+            # don't attempt hardware if dry_run
+            return
+        try:
+            if hasattr(self._mc, 'set_color'):
+                try:
+                    self._mc.set_color(int(r), int(g), int(b))
+                except Exception:
+                    pass
+        except Exception:
+            pass
